@@ -30,12 +30,12 @@ image = tf.cast(image, tf.float32) / 255.
 image = tf.image.resize_images(image, 28, 28)
 
 # make batches
-im_batch, lb_batch = tf.train.batch([image, label], batch_size=5)
+im_batch, lb_batch = tf.train.batch([image, label], batch_size=1)
 
 # Parameter
 learning_rate = 0.001
 training_iters = 1000
-batch_size = 5
+batch_size = 1
 display_step = 2
 
 # Network Parameters
@@ -134,30 +134,63 @@ with tf.Session() as sess:
     coord = tf.train.Coordinator()
     threads = tf.train.start_queue_runners(coord=coord)
 
-    print 'I have reached here'
-    while step * batch_size < training_iters:
-        print ('iteraring')
-        batch_x, batch_y = sess.run([im_batch, lb_batch])
-        #batch_x, batch_y = mnist.train.next_batch(batch_size)
-        # Run optimization op (backprop)
-        batch_x = np.reshape(batch_x, (-1, 784))
-        batch_y = np.reshape(batch_y, (-1, 5))
-        sess.run(optimizer, feed_dict={x: batch_x, y: batch_y,
+    try:
+        while not coord.should_stop():
+
+
+            print 'I have reached here'
+            while step * batch_size < training_iters:
+                print ('iterating')
+                batch_x, batch_y = sess.run([im_batch, lb_batch])
+                #batch_x, batch_y = mnist.train.next_batch(batch_size)
+                # Run optimization op (backprop)
+                batch_x = np.reshape(batch_x, (-1, 784))
+                #batch_y = np.reshape(batch_y, (-1, 5))
+                sess.run(optimizer, feed_dict={x: batch_x, y: batch_y,
                                        keep_prob: dropout})
-        print 'coming here'
-        if step % display_step == 0:
-            # Calculate batch loss and accuracy
-            loss, acc = sess.run([cost, accuracy], feed_dict={x: batch_x,
+                print 'coming here'
+                if step % display_step == 0:
+                    # Calculate batch loss and accuracy
+                    loss, acc = sess.run([cost, accuracy], feed_dict={x: batch_x,
                                                               y: batch_y,
                                                               keep_prob: 1.})
-            print("Iter " + str(step*batch_size) + ", Minibatch Loss= " + \
-                  "{:.6f}".format(loss) + ", Training Accuracy= " + \
-                  "{:.5f}".format(acc))
-        step += 1
-    print("Optimization Finished!")
+                    print("Iter " + str(step*batch_size) + ", Minibatch Loss= " + \
+                        "{:.6f}".format(loss) + ", Training Accuracy= " + \
+                        "{:.5f}".format(acc))
+                step += 1
+            print("Optimization Finished!")
+
+    except tf.errors.OutOfRangeError:
+        print('Done training -- epoch limit reached')
+    finally:
+        # When done, ask the threads to stop.
+        coord.request_stop()
+        # Wait for threads to finish.
+        coord.join(threads)
+
+'''
 
     # Calculate accuracy for 256 mnist test images
     #print("Testing Accuracy:", \
     #    sess.run(accuracy, feed_dict={x: mnist.test.images[:256],
     #                                  y: mnist.test.labels[:256],
     #                                  keep_prob: 1.}))
+
+# Start input enqueue threads.
+coord = tf.train.Coordinator()
+threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+
+try:
+    while not coord.should_stop():
+        # Run training steps or whatever
+        sess.run(train_op)
+
+except tf.errors.OutOfRangeError:
+
+finally:
+    # When done, ask the threads to stop.
+    coord.request_stop()
+
+    # Wait for threads to finish.
+    coord.join(threads)
+'''
