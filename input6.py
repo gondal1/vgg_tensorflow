@@ -2,6 +2,7 @@ import tensorflow as tf
 import numpy as np
 import os
 
+
 IMAGE_HEIGHT  = 240    #960
 IMAGE_WIDTH   = 180    #720
 NUM_CHANNELS  = 3
@@ -12,7 +13,7 @@ logs_path = './tensorflow_logs/new'
 #=======================================================================================================
 
 # load csv content
-csv_path = tf.train.string_input_producer(['/home/waleed/Desktop/leaf_data.csv'])
+csv_path = tf.train.string_input_producer(['/home/waleed/Desktop/leaf_example/train.csv'])
 textReader = tf.TextLineReader()
 _, csv_content = textReader.read(csv_path)
 im_name, label = tf.decode_csv(csv_content, record_defaults=[[""], [1]])
@@ -20,29 +21,60 @@ im_name, label = tf.decode_csv(csv_content, record_defaults=[[""], [1]])
 # load images, and convert labels into one_hot encoded form
 im_content = tf.read_file(im_name)
 image = tf.image.decode_jpeg(im_content, channels=3)
-image = tf.cast(image, tf.float32) / 255. # could be unnecessary
-image = tf.image.resize_images(image, 240, 180)
-label = tf.one_hot(label, 4, 1, 0 )
+image = tf.cast(image, tf.float32) # could be unnecessary
+#image = tf.image.resize_images(image, 240, 180)
+label = tf.one_hot(label, 40, 1, 0 )
 label = tf.cast(label, tf.float32 )
 
+
+#========================================================================================================
+# Data Augmentation
+#========================================================================================================
+
+height = IMAGE_HEIGHT
+width = IMAGE_WIDTH
+
+# Image processing for training the network. Note the many random
+# distortions applied to the image.
+
+# Crop the center portion
+image = tf.image.central_crop(image, 0.8)
+
+image = tf.image.resize_images(image, 240, 180)
+# Randomly crop a [height, width] section of the image.
+#image = tf.random_crop(image, [IMAGE_HEIGHT, IMAGE_WIDTH, 3])
+
+# Randomly flip the image horizontally.
+distorted_image = tf.image.random_flip_left_right(image)
+
+# Because these operations are not commutative, consider randomizing
+# the order their operation.
+distorted_image = tf.image.random_brightness(distorted_image, max_delta=50)
+distorted_image = tf.image.random_contrast(distorted_image, lower=0.2, upper=2.8)
+
+# Subtract off the mean and divide by the variance of the pixels.
+float_image = tf.image.per_image_whitening(distorted_image)
+
+
+
 # Make Batches of images with shuffling
-min_after_dequeue = 10                                               # Defines how big a buffer we will randomly sample from -- bigger means better shuffling but slower start up and more memory used
+min_after_dequeue = 30                                               # Defines how big a buffer we will randomly sample from -- bigger means better shuffling but slower start up and more memory used
 capacity = min_after_dequeue + 3 * BATCH_SIZE                        # Capacity must be larger than min_after_dequeue and the amount larger determines the maximum we will prefetch.
 train_image_batch, train_label_batch = tf.train.shuffle_batch(
-    [image, label], batch_size=BATCH_SIZE, capacity=capacity,
+    [float_image, label], batch_size=BATCH_SIZE, capacity=capacity,
     min_after_dequeue=min_after_dequeue)
 
-
+tf.image_summary('images', train_image_batch, max_images=10)
 #====================================================================================================
 # Model Hyperparameters, and characteristics
 #=====================================================================================================
 # Model Parameters
-LEARNING_RATE = 0.001
-TRAINING_ITERS = 500
-DISPLAY_STEP = 5
+LEARNING_RATE = 0.0001
+TRAINING_ITERS = 20000
+DISPLAY_STEP = 10
 
 # Network Parameters
-N_CLASSES = 4
+N_CLASSES = 40
 DROPOUT = 0.75                                                       # Dropout,probability to keep units
 
 # tf Graph input
@@ -59,40 +91,96 @@ def conv2d(x, W, b, strides=1):
 def maxPool(x, k=2, s=2):
     return tf.nn.max_pool(x, ksize=[1, k, k, 1], strides=[1, s, s, 1], padding='SAME')
 
+def put_kernels_on_grid (kernel, grid_Y, grid_X, pad = 1):
 
+    '''Visualize conv. features as an image (mostly for the 1st layer).
+    Place kernel into a grid, with some paddings between adjacent filters.
+
+    Args:
+      kernel:            tensor of shape [Y, X, NumChannels, NumKernels]
+      (grid_Y, grid_X):  shape of the grid. Require: NumKernels == grid_Y * grid_X
+                           User is responsible of how to break into two multiples.
+      pad:               number of black pixels around each filter (between them)
+
+    Return:
+      Tensor of shape [(Y+2*pad)*grid_Y, (X+2*pad)*grid_X, NumChannels, 1].
+    '''
+
+    x_min = tf.reduce_min(kernel)
+    x_max = tf.reduce_max(kernel)
+
+    kernel1 = (kernel - x_min) / (x_max - x_min)
+
+    # pad X and Y
+    x1 = tf.pad(kernel1, tf.constant( [[pad,pad],[pad, pad],[0,0],[0,0]] ), mode = 'CONSTANT')
+
+    # X and Y dimensions, w.r.t. padding
+    Y = kernel1.get_shape()[0] + 2 * pad
+    X = kernel1.get_shape()[1] + 2 * pad
+
+    channels = kernel1.get_shape()[2]
+
+    # put NumKernels to the 1st dimension
+    x2 = tf.transpose(x1, (3, 0, 1, 2))
+    # organize grid on Y axis
+    x3 = tf.reshape(x2, tf.pack([grid_X, Y * grid_Y, X, channels])) #3
+
+    # switch X and Y axes
+    x4 = tf.transpose(x3, (0, 2, 1, 3))
+    # organize grid on X axis
+    x5 = tf.reshape(x4, tf.pack([1, X * grid_X, Y * grid_Y, channels])) #3
+
+    # back to normal order (not combining with the next step for clarity)
+    x6 = tf.transpose(x5, (2, 1, 3, 0))
+
+    # to tf.image_summary order [batch_size, height, width, channels],
+    #   where in this case batch_size == 1
+    x7 = tf.transpose(x6, (3, 0, 1, 2))
+
+    # scale to [0, 255] and convert to uint8
+    return tf.image.convert_image_dtype(x7, dtype = tf.uint8)
 # Model
 def convolutionalNet(x, weights, biases, dropout):
 
-    '''
-    # 1. Convolution layer, max-pooling, stride=1
-    conv1 = conv2d(x, weights['wc1'], biases['bc1'])
-    print "pool1.shape:", conv1.get_shape()
-    pool1 = maxPool(conv1)
-    print "pool1.shape:", pool1.get_shape()
-    tf.histogram_summary("layer1", pool1)
-
-    # 2. Second Convolutional layer, max-pooling, stride=1
-    conv2 = conv2d(pool1, weights['wc2'], biases['bc2'])
-    print "conv2.shape:", conv2.get_shape()
-    pool2 = maxPool(conv2)
-    print "pool2.shape:", pool2.get_shape()
-    tf.histogram_summary("layer2", pool2)
-
-    # 3. Fully connected layer 1
-    pool2Shape = pool2.get_shape().as_list()                           # Reshape conv2 output to fit fully connected layer input
-    fc1 = tf.reshape(pool2, [-1, pool2Shape[1] * pool2Shape[2] * pool2Shape[3]])
-    fc1 = tf.add(tf.matmul(fc1, weights['wd1']), biases['bd1'])
-    fc1 = tf.nn.relu(fc1)
-    fc1 = tf.nn.dropout(fc1, dropout)                                   # Apply Dropout
-
-    # 4. Output Layer
-    out = tf.add(tf.matmul(fc1, weights['out']), biases['out'])
-    return out
-    '''
 
     with tf.name_scope('conv1_1') as scope:
         conv1_1 = conv2d(x, weights['wc1'], biases['bc1'],2)
         tf.histogram_summary("conv1_1", conv1_1)
+
+        with tf.variable_scope('visualization'):
+
+            grid_x =8
+            grid_y =4
+            grid = put_kernels_on_grid (weights['wc1'], grid_y, grid_x)
+            tf.image_summary('conv1/features', grid, max_images=1)
+            # scale weights to [0 1], type is still float
+            #x_min = tf.reduce_min(weights['wc1'])
+            #x_max = tf.reduce_max(weights['wc1'])
+            #kernel_0_to_1 = (weights['wc1'] - x_min) / (x_max - x_min)
+            # to tf.image_summary format [batch_size, height, width, channels]
+            #kernel_transposed = tf.transpose (kernel_0_to_1, [3, 0, 1, 2])
+            # this will display random 3 filters from the 64 in conv1
+            #tf.image_summary('conv1_1/filters', kernel_transposed, max_images=3)
+
+        ## Prepare for visualization
+        # Take only convolutions of first image, discard convolutions for other images.
+        #V = tf.slice(conv1_1, (0, 0, 0, 0), (1, -1, -1, -1), name='slice_first_input')
+        #V = tf.reshape(V, (120, 90, 32))
+
+        # Reorder so the channels are in the first dimension, x and y follow.
+        #V = tf.transpose(V, (2, 0, 1))
+        # Bring into shape expected by image_summary
+        #V = tf.reshape(V, (-1, 240, 180, 1))
+
+        #tf.image_summary("first_conv", V)
+
+        #with tf.variable_scope('visualization'):
+            #tf.get_variable_scope().reuse_variables()
+            #weights = tf.get_variable(weights['wc1'])
+            #grid_x = grid_y = 8   # to get a square grid for 64 conv1 features
+            #grid = put_kernels_on_grid (weights, (grid_y, grid_x))
+            #tf.image_summary('conv1/features', grid, max_images=1)
+
     with tf.name_scope('conv1_2') as scope:
         conv1_2 = conv2d(conv1_1, weights['wc2'], biases['bc2'])
         tf.histogram_summary("conv1_2", conv1_2)
@@ -203,11 +291,11 @@ with tf.name_scope('Loss'):
     tf.scalar_summary("loss", loss)
 
 with tf.name_scope('SGD'):
-    #optimizer = tf.train.GradientDescentOptimizer(learning_rate=LEARNING_RATE).minimize(loss)
-    optimizer = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE)
-    grads = tf.gradients(loss, tf.trainable_variables())
-    grads = list(zip(grads, tf.trainable_variables()))
-    apply_grads = optimizer.apply_gradients(grads_and_vars=grads)
+    optimizer = tf.train.GradientDescentOptimizer(learning_rate=LEARNING_RATE).minimize(loss)
+    #optimizer = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE)
+    #grads = tf.gradients(loss, tf.trainable_variables())
+    #grads = list(zip(grads, tf.trainable_variables()))
+    #apply_grads = optimizer.apply_gradients(grads_and_vars=grads)
 
 
 # Evaluate model
@@ -252,19 +340,27 @@ with tf.Session() as sess:
     print 'Starting training'
     while step * BATCH_SIZE < TRAINING_ITERS:
         batch_x, batch_y = sess.run([train_image_batch, train_label_batch])
+        #print  batch_y
 
-        _, c, summary = sess.run([apply_grads, loss, merged_summary_op], feed_dict={x: batch_x, y: batch_y, drop_out: DROPOUT})
+        _, c, summary = sess.run([optimizer, loss, merged_summary_op], feed_dict={x: batch_x, y: batch_y, drop_out: DROPOUT})
 
 
         if step % DISPLAY_STEP == 0:
             # Calculate batch loss and accuracy
-            loss_value, acc = sess.run([loss, accuracy], feed_dict={x: batch_x, y: batch_y, drop_out: 1.})
+            loss_value, acc= sess.run([loss, accuracy], feed_dict={x: batch_x, y: batch_y, drop_out: 0.5})
             print("Iter " + str(step*BATCH_SIZE) + ", Minibatch Loss= " + \
                 "{:.6f}".format(loss_value) + ", Training Accuracy= " + \
                 "{:.5f}".format(acc))
+            summary_writer.add_summary(summary, step)
         step += 1
 
-        summary_writer.add_summary(summary, step)
+        #summary_writer.add_summary(summary, step)
     print("Optimization Finished!")
 
     saver.save(sess, ckpt_dir + "/model.ckpt")
+    '''
+    combined_summary.MergeFromString(image_summary)
+    if i % 10 == 0:
+        summary_writer.add_summary(combined_summary)
+        combined_summary = tf.Summary()
+    '''
